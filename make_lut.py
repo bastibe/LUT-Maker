@@ -28,11 +28,10 @@ def main(source_path, target_path, lut_name):
             for bi in range(lut_matrix.shape[2]):
                 num = color_count[ri, gi, bi]
                 if num > MIN_COLOR_SAMPLES:
-                    lut_matrix[ri, gi, bi] = color_sum[ri, gi, bi] / num
+                    lut_matrix[ri, gi, bi] = (color_sum[ri, gi, bi] / num).clip(0, 255)
                 else:
                     lut_matrix[ri, gi, bi] = [ri * RGB2IDX, gi * RGB2IDX, bi * RGB2IDX]
 
-    lut_matrix = lut_matrix.clip(0, 255)
     lut_image = lut_matrix.swapaxes(0, 2).reshape([LUT_IMAGE_SIZE, LUT_IMAGE_SIZE, 3])
     Image.fromarray(lut_image).save(lut_name, 'PNG')
 
