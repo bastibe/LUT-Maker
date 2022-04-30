@@ -1,5 +1,7 @@
 # Create LUTs from image pairs
 
+*based on https://github.com/savuori/haldclut_dt*
+
 given two directories full of JPGs, one *source* directory containing neutral output of an image editing program, and one *target* directory containing the same images with a desired look, the script 
 
     python make_lut.py source_dir/ target_dir/ lut.png
