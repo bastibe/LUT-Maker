@@ -7,17 +7,21 @@ from PIL import Image
 from tqdm import tqdm
 
 
-MIN_COLOR_SAMPLES = 5
-LUT_CUBE_SIZE = 64
-LUT_IMAGE_SIZE = 512
-RGB2IDX = int(256 / LUT_CUBE_SIZE)
-assert LUT_CUBE_SIZE**3 == LUT_IMAGE_SIZE**2, "LUT configuration invalid"
+MIN_COLOR_SAMPLES = 5  # discard LUT pixels if they have less than this many color samples
+LUT_CUBE_SIZE = 64  # LUT cube size, this many steps per color
+LUT_IMAGE_SIZE = 512  # corresponding LUT image size
 WEIGHT_FACTOR = 2  # factor to weigh sampled colors higher than neutral colors
 SMOOTHING_SIGMA = 4  # standard deviation of smoothing kernel
                      # kernel is a 6*sigma gaussian cube
+SUBSAMPLING = 5  # downscale images by this factor
+
+RGB2IDX = int(256 / LUT_CUBE_SIZE)  # conversion factor from RGB levels to cube coordinates
+assert LUT_CUBE_SIZE**3 == LUT_IMAGE_SIZE**2, "LUT configuration invalid"
 
 
 def main(source_path, target_path, lut_name):
+    """Read all images in source/target path, smooth and extrapolate, then create LUT"""
+
     color_sum = numpy.zeros([LUT_CUBE_SIZE, LUT_CUBE_SIZE, LUT_CUBE_SIZE, 3], dtype='uint64')
     color_count = numpy.zeros([LUT_CUBE_SIZE, LUT_CUBE_SIZE, LUT_CUBE_SIZE], dtype='uint64')
 
@@ -26,7 +30,7 @@ def main(source_path, target_path, lut_name):
         try:
             load_and_map_images(source_img, target_img, color_sum, color_count)
         except TypeError as err:
-            print(err)
+            print(err)  # skip image if there was an error
 
     lut_matrix = numpy.zeros(color_sum.shape, dtype='uint8')
     for ri in range(lut_matrix.shape[0]):
@@ -34,7 +38,12 @@ def main(source_path, target_path, lut_name):
             for bi in range(lut_matrix.shape[2]):
                 num = color_count[ri, gi, bi]
                 if num > MIN_COLOR_SAMPLES:
-                    lut_matrix[ri, gi, bi] = (color_sum[ri, gi, bi] / num).clip(0, 255)
+                    mean_color = (color_sum[ri, gi, bi] / num).clip(0, 255)
+                    if not all(mean_color == 0):
+                        # all-black is probably an artifact
+                        lut_matrix[ri, gi, bi] = mean_color
+                    else:
+                        lut_matrix[ri, gi, bi] = [ri * RGB2IDX, gi * RGB2IDX, bi * RGB2IDX]
                 else:
                     lut_matrix[ri, gi, bi] = [ri * RGB2IDX, gi * RGB2IDX, bi * RGB2IDX]
 
@@ -44,15 +53,61 @@ def main(source_path, target_path, lut_name):
 
 
 def same_images(source_path, target_path):
-    for source_img in source_path.glob('*.png'):
+    """Iterator that walks source and target paths, looking for identical images"""
+
+    for source_img in source_path.glob('*.jpg'):
         target_img = target_path / source_img.name
         if target_img.exists():
             yield source_img, target_img
+        else:
+            print(f"No matching image found for {source_img.name}")
 
 
 def load_and_map_images(source_file, target_file, color_sum, color_count):
-    source = numpy.asarray(Image.open(source_file))
-    target = numpy.asarray(Image.open(target_file))
+    """Load all pixels from source/target file into LUT matrices
+
+    Target images are rotated as necessary.
+    All images and downsampled to hide sharpening/artifacts.
+    """
+
+    source_image = Image.open(source_file)
+    target_image = Image.open(target_file)
+
+    # read orientation tag (EXIF 274):
+    orientation = target_image.getexif()[274]
+    if orientation == 1:
+        pass  # right side up
+    elif orientation == 8:
+        target_image = target_image.transpose(2)  # rotate 90
+    elif orientation == 3:
+        target_image = target_image.transpose(3)  # rotate 180
+    elif orientation == 6:
+        target_image = target_image.transpose(4)  # rotate 270
+
+    # crop away outer pixels if one of the images is larger:
+    source_crop = [0, 0, source_image.width, source_image.height]
+    target_crop = [0, 0, target_image.width, target_image.height]
+    if source_image.width > target_image.width:
+        source_crop[0] = (source_image.width - target_image.width)//2
+        source_crop[2] = target_image.width
+    elif source_image.width < target_image.width:
+        target_crop[0] = (target_image.width - source_image.width)//2
+        target_crop[2] = source_image.width
+    if source_image.height > target_image.height:
+        source_crop[1] = (source_image.height - target_image.height)//2
+        source_crop[3] = target_image.height
+    elif source_image.height < target_image.height:
+        target_crop[1] = (target_image.height - source_image.height)//2
+        target_crop[3] = source_image.height
+
+    # resize to hide sharpening etc.
+    source_image = source_image.resize([source_crop[2] // SUBSAMPLING, source_crop[3] // SUBSAMPLING],
+                                       resample=Image.Resampling.LANCZOS, box=source_crop)
+    target_image = target_image.resize([target_crop[2] // SUBSAMPLING, target_crop[3] // SUBSAMPLING],
+                                       resample=Image.Resampling.LANCZOS, box=target_crop)
+
+    source = numpy.asarray(source_image)
+    target = numpy.asarray(target_image)
 
     if source.shape != target.shape:
         raise TypeError(f'Shape different in {source_file.name} ({source.shape}) and '
@@ -63,17 +118,31 @@ def load_and_map_images(source_file, target_file, color_sum, color_count):
 
 @numba.jit(nopython=True)
 def count_pixels(source, target, color_sum, color_count):
+    """Iterate through pixels in source/target, add their values to color_sum and color_count
+
+    color_sum holds the sum of rgb values for each LUT bin in all images
+    color_count holds the number of samples for each bin
+
+    Does not count black pixels, as they are most likely artifacts.
+    """
     for x in range(source.shape[0]):
         for y in range(source.shape[1]):
             ri, gi, bi = source[x, y] // RGB2IDX
             color_sum[ri, gi, bi] += target[x, y]
-            color_count[ri, gi, bi] += 1
+            if not (ri == gi == bi == 0):  # don't count black pixels; they are probably artifacts
+                color_count[ri, gi, bi] += 1
 
 
 def smooth_and_extrapolate(lut_matrix, sample_count, sigma):
+    """Smooth lut_matrix with a gaussian kernel of standard deviation sigma
+
+    Smoothing is not just a convolution with the kernel, but weighs
+    sampled LUT pixels higher than guessed remaining pixels.
+    Also does not sample beyond lut boundaries.
+
+    """
     kernel = gaussian_kernel(sigma)
-    for ri in tqdm(range(lut_matrix.shape[0]),
-                   desc='fixing LUT'):
+    for ri in tqdm(range(lut_matrix.shape[0]), desc='fixing LUT'):
         for gi in range(lut_matrix.shape[1]):
             for bi in range(lut_matrix.shape[2]):
                 lut_matrix[ri, gi, bi] = smooth_extrapolate_color(lut_matrix, sample_count, sigma,
@@ -82,6 +151,7 @@ def smooth_and_extrapolate(lut_matrix, sample_count, sigma):
 
 
 def gaussian_kernel(sigma):
+    """Create a gaussian kernel of size 3*sigma cubed, with standard deviation sigma"""
     radius = sigma * 3
     kernel = numpy.zeros((2*radius+1, 2*radius+1, 2*radius+1))
     for dr in range(-radius, radius+1):
@@ -99,6 +169,12 @@ def gaussian(x, mu=0, sigma_squared=1):
 
 @numba.jit(nopython=True)
 def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel):
+    """Calculate the smoothed color of the pixel at coordinate in lut_matrix
+
+    weighs pixels with count > MIN_COLOR_SAMPLES more highly than
+    remaining interpolated pixels.
+
+    """
     ri, gi, bi = coordinate
     radius = sigma * 3
 
@@ -108,7 +184,7 @@ def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel
         for dg in range(max(0, gi-radius), min(gi+radius+1, LUT_CUBE_SIZE)):
             for db in range(max(0, bi-radius), min(bi+radius+1, LUT_CUBE_SIZE)):
                 weight = kernel[dr-ri+radius, dg-gi+radius, db-bi+radius]
-                if count_matrix[dr, dg, db] > 5:
+                if count_matrix[dr, dg, db] > MIN_COLOR_SAMPLES:
                     weight *= WEIGHT_FACTOR
                 sum_color = sum_color + weight * lut_matrix[dr, dg, db]
                 sum_weights += weight
