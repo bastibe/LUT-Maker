@@ -32,22 +32,8 @@ def main(source_path, target_path, lut_name):
         except TypeError as err:
             print(err)  # skip image if there was an error
 
-    lut_matrix = numpy.zeros(color_sum.shape, dtype='uint8')
-    for ri in range(lut_matrix.shape[0]):
-        for gi in range(lut_matrix.shape[1]):
-            for bi in range(lut_matrix.shape[2]):
-                num = color_count[ri, gi, bi]
-                if num > MIN_COLOR_SAMPLES:
-                    mean_color = (color_sum[ri, gi, bi] / num).clip(0, 255)
-                    if not all(mean_color == 0):
-                        # all-black is probably an artifact
-                        lut_matrix[ri, gi, bi] = mean_color
-                    else:
-                        lut_matrix[ri, gi, bi] = [ri * RGB2IDX, gi * RGB2IDX, bi * RGB2IDX]
-                else:
-                    lut_matrix[ri, gi, bi] = [ri * RGB2IDX, gi * RGB2IDX, bi * RGB2IDX]
-
-    lut_matrix = smooth_and_extrapolate(lut_matrix, color_count, SMOOTHING_SIGMA)
+    lut_matrix = generate_lut(color_sum, color_count)
+    lut_matrix = smooth_and_extrapolate_lut(lut_matrix, color_count, SMOOTHING_SIGMA)
     lut_image = lut_matrix.swapaxes(0, 2).reshape([LUT_IMAGE_SIZE, LUT_IMAGE_SIZE, 3])
     Image.fromarray(lut_image).save(lut_name, 'PNG')
 
@@ -133,7 +119,31 @@ def count_pixels(source, target, color_sum, color_count):
                 color_count[ri, gi, bi] += 1
 
 
-def smooth_and_extrapolate(lut_matrix, sample_count, sigma):
+def generate_lut(color_sum, color_count):
+    """Average out samples from color_sum, but reject obvious artifacts
+
+    artifacts are replaced by identity colors
+    """
+
+    lut_matrix = numpy.zeros(color_sum.shape, dtype='uint8')
+    for ridx in range(lut_matrix.shape[0]):
+        for gidx in range(lut_matrix.shape[1]):
+            for bidx in range(lut_matrix.shape[2]):
+                sample_count = color_count[ridx, gidx, bidx]
+                identity_color = [ridx * RGB2IDX, gidx * RGB2IDX, bidx * RGB2IDX]
+                mean_color = (color_sum[ridx, gidx, bidx] / sample_count).clip(0, 255) \
+                    if sample_count > 0 else [0, 0, 0]
+                # artifact conditions:
+                # - not enough samples
+                # - color obviously wrong
+                if sample_count < MIN_COLOR_SAMPLES or sum(mean_color) < sum(identity_color)/2:
+                    lut_matrix[ridx, gidx, bidx] = identity_color
+                else:
+                    lut_matrix[ridx, gidx, bidx] = mean_color
+    return lut_matrix
+
+
+def smooth_and_extrapolate_lut(lut_matrix, sample_count, sigma):
     """Smooth lut_matrix with a gaussian kernel of standard deviation sigma
 
     Smoothing is not just a convolution with the kernel, but weighs
@@ -142,11 +152,11 @@ def smooth_and_extrapolate(lut_matrix, sample_count, sigma):
 
     """
     kernel = gaussian_kernel(sigma)
-    for ri in tqdm(range(lut_matrix.shape[0]), desc='fixing LUT'):
-        for gi in range(lut_matrix.shape[1]):
-            for bi in range(lut_matrix.shape[2]):
-                lut_matrix[ri, gi, bi] = smooth_extrapolate_color(lut_matrix, sample_count, sigma,
-                                                                  (ri, gi, bi), kernel)
+    for ridx in tqdm(range(lut_matrix.shape[0]), desc='fixing LUT'):
+        for gidx in range(lut_matrix.shape[1]):
+            for bidx in range(lut_matrix.shape[2]):
+                lut_matrix[ridx, gidx, bidx] = \
+                    smooth_extrapolate_color(lut_matrix, sample_count, sigma, (ridx, gidx, bidx), kernel)
     return lut_matrix
 
 
