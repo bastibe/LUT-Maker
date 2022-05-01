@@ -154,11 +154,12 @@ def gaussian_kernel(sigma):
     """Create a gaussian kernel of size 3*sigma cubed, with standard deviation sigma"""
     radius = sigma * 3
     kernel = numpy.zeros((2*radius+1, 2*radius+1, 2*radius+1))
-    for dr in range(-radius, radius+1):
-        for dg in range(-radius, radius+1):
-            for db in range(-radius, radius+1):
-                distance = ( dr**2 + dg**2 + db**2 )**0.5
-                kernel[dr+radius, dg+radius, db+radius] = gaussian(distance, sigma_squared=sigma**2)
+    for rdelta in range(-radius, radius+1):
+        for gdelta in range(-radius, radius+1):
+            for bdelta in range(-radius, radius+1):
+                distance = ( rdelta**2 + gdelta**2 + bdelta**2 )**0.5
+                kernel[rdelta+radius, gdelta+radius, bdelta+radius] = \
+                    gaussian(distance, sigma_squared=sigma**2)
     return kernel
 
 
@@ -171,22 +172,35 @@ def gaussian(x, mu=0, sigma_squared=1):
 def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel):
     """Calculate the smoothed color of the pixel at coordinate in lut_matrix
 
-    weighs pixels with count > MIN_COLOR_SAMPLES more highly than
+    Weighs pixels with count > MIN_COLOR_SAMPLES more highly than
     remaining interpolated pixels.
 
+    Near LUT boundaries, only samples a symmetric area around
+    coordinate, so as to preserve boundary values.
+
     """
-    ri, gi, bi = coordinate
-    radius = sigma * 3
+    rstart, gstart, bstart = coordinate
+    kernel_radius = sigma * 3  # kernel is a 2*radius+1 cube
 
     sum_color = numpy.zeros(3)
     sum_weights = 0
-    for dr in range(max(0, ri-radius), min(ri+radius+1, LUT_CUBE_SIZE)):
-        for dg in range(max(0, gi-radius), min(gi+radius+1, LUT_CUBE_SIZE)):
-            for db in range(max(0, bi-radius), min(bi+radius+1, LUT_CUBE_SIZE)):
-                weight = kernel[dr-ri+radius, dg-gi+radius, db-bi+radius]
-                if count_matrix[dr, dg, db] > MIN_COLOR_SAMPLES:
+    # calculate radii around coordinate that fit within the LUT. Radii
+    # are kernel_radius by default, but get smaller near boundaries.
+    # If this were not done, smoothing volumes would become asymmetric
+    # at boundaries, and limit extreme values.
+    rradius = min(kernel_radius, rstart, LUT_CUBE_SIZE-rstart-1)
+    gradius = min(kernel_radius, gstart, LUT_CUBE_SIZE-gstart-1)
+    bradius = min(kernel_radius, bstart, LUT_CUBE_SIZE-bstart-1)
+    # iterate over all indices in a box around coordinate:
+    for rdelta in range(-rradius, rradius+1):
+        for gdelta in range(-gradius, gradius+1):
+            for bdelta in range(-bradius, bradius+1):
+                weight = kernel[kernel_radius+rdelta, kernel_radius+gdelta, kernel_radius+bdelta]
+                sample_count = count_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
+                if sample_count > MIN_COLOR_SAMPLES:
                     weight *= WEIGHT_FACTOR
-                sum_color = sum_color + weight * lut_matrix[dr, dg, db]
+                lut_color = lut_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
+                sum_color = sum_color + weight * lut_color
                 sum_weights += weight
     r, g, b = sum_color / sum_weights
     return numpy.array([r, g, b], dtype='uint8')
