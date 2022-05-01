@@ -11,6 +11,7 @@ MIN_COLOR_SAMPLES = 5  # discard LUT pixels if they have less than this many col
 LUT_CUBE_SIZE = 64  # LUT cube size, this many steps per color
 LUT_IMAGE_SIZE = 512  # corresponding LUT image size
 WEIGHT_FACTOR = 2  # factor to weigh sampled colors higher than neutral colors
+BOUNDARY_WEIGHT_FACTOR = 5  # factor to weigh boundary colors higher than neutral colors
 SMOOTHING_SIGMA = 4  # standard deviation of smoothing kernel
                      # kernel is a 6*sigma gaussian cube
 SUBSAMPLING = 5  # downscale images by this factor
@@ -113,10 +114,10 @@ def count_pixels(source, target, color_sum, color_count):
     """
     for x in range(source.shape[0]):
         for y in range(source.shape[1]):
-            ri, gi, bi = source[x, y] // RGB2IDX
-            color_sum[ri, gi, bi] += target[x, y]
-            if not (ri == gi == bi == 0):  # don't count black pixels; they are probably artifacts
-                color_count[ri, gi, bi] += 1
+            ridx, gidx, bidx = source[x, y] // RGB2IDX
+            color_sum[ridx, gidx, bidx] += target[x, y]
+            if not (ridx == gidx == bidx == 0):  # don't count black pixels; they are probably artifacts
+                color_count[ridx, gidx, bidx] += 1
 
 
 def generate_lut(color_sum, color_count):
@@ -138,6 +139,8 @@ def generate_lut(color_sum, color_count):
                 # - color obviously wrong
                 if sample_count < MIN_COLOR_SAMPLES or sum(mean_color) < sum(identity_color)/2:
                     lut_matrix[ridx, gidx, bidx] = identity_color
+                    # and mark color as interpolated for later smoothing step:
+                    color_count[ridx, gidx, bidx] = 0
                 else:
                     lut_matrix[ridx, gidx, bidx] = mean_color
     return lut_matrix
@@ -207,7 +210,11 @@ def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel
             for bdelta in range(-bradius, bradius+1):
                 weight = kernel[kernel_radius+rdelta, kernel_radius+gdelta, kernel_radius+bdelta]
                 sample_count = count_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
-                if sample_count > MIN_COLOR_SAMPLES:
+                if rstart+rdelta == 0 or gstart+gdelta == 0 or bstart+bdelta == 0 or \
+                   rstart+rdelta == LUT_CUBE_SIZE-1 or gstart+gdelta == LUT_CUBE_SIZE-1 or \
+                   bstart+bdelta == LUT_CUBE_SIZE-1:
+                    weight *= BOUNDARY_WEIGHT_FACTOR
+                elif sample_count > MIN_COLOR_SAMPLES:
                     weight *= WEIGHT_FACTOR
                 lut_color = lut_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
                 sum_color = sum_color + weight * lut_color
