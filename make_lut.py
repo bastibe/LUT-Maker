@@ -154,13 +154,14 @@ def smooth_and_extrapolate_lut(lut_matrix, sample_count, sigma):
     Also does not sample beyond lut boundaries.
 
     """
+    out_matrix = lut_matrix.copy()
     kernel = gaussian_kernel(sigma)
-    for ridx in tqdm(range(lut_matrix.shape[0]), desc='fixing LUT'):
-        for gidx in range(lut_matrix.shape[1]):
-            for bidx in range(lut_matrix.shape[2]):
-                lut_matrix[ridx, gidx, bidx] = \
+    for ridx in tqdm(range(LUT_CUBE_SIZE), desc='processing LUT'):
+        for gidx in range(LUT_CUBE_SIZE):
+            for bidx in range(LUT_CUBE_SIZE):
+                out_matrix[ridx, gidx, bidx] = \
                     smooth_extrapolate_color(lut_matrix, sample_count, sigma, (ridx, gidx, bidx), kernel)
-    return lut_matrix
+    return out_matrix
 
 
 def gaussian_kernel(sigma):
