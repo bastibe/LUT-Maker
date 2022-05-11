@@ -23,6 +23,7 @@ assert LUT_CUBE_SIZE**3 == LUT_IMAGE_SIZE**2, "LUT configuration invalid"
 def main(source_path, target_path, lut_name):
     """Read all images in source/target path, smooth and extrapolate, then create LUT"""
 
+    print(f"Generating LUT: {lut_name} ({source_path}->{target_path})")
     color_sum = numpy.zeros([LUT_CUBE_SIZE, LUT_CUBE_SIZE, LUT_CUBE_SIZE, 3], dtype='uint64')
     color_count = numpy.zeros([LUT_CUBE_SIZE, LUT_CUBE_SIZE, LUT_CUBE_SIZE], dtype='uint64')
 
@@ -87,7 +88,7 @@ def load_and_map_images(source_file, target_file, color_sum, color_count):
         target_crop[1] = (target_image.height - source_image.height)//2
         target_crop[3] = source_image.height
 
-    # resize to hide sharpening etc.
+    # downscale to hide sharpening etc.
     source_image = source_image.resize([source_crop[2] // SUBSAMPLING, source_crop[3] // SUBSAMPLING],
                                        resample=Image.Resampling.LANCZOS, box=source_crop)
     target_image = target_image.resize([target_crop[2] // SUBSAMPLING, target_crop[3] // SUBSAMPLING],
@@ -127,9 +128,9 @@ def generate_lut(color_sum, color_count):
     """
 
     lut_matrix = numpy.zeros(color_sum.shape, dtype='uint8')
-    for ridx in range(lut_matrix.shape[0]):
-        for gidx in range(lut_matrix.shape[1]):
-            for bidx in range(lut_matrix.shape[2]):
+    for ridx in range(LUT_CUBE_SIZE):
+        for gidx in range(LUT_CUBE_SIZE):
+            for bidx in range(LUT_CUBE_SIZE):
                 sample_count = color_count[ridx, gidx, bidx]
                 identity_color = [ridx * RGB2IDX, gidx * RGB2IDX, bidx * RGB2IDX]
                 mean_color = (color_sum[ridx, gidx, bidx] / sample_count).clip(0, 255) \
@@ -189,8 +190,8 @@ def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel
     Weighs pixels with count > MIN_COLOR_SAMPLES more highly than
     remaining interpolated pixels.
 
-    Near LUT boundaries, only samples a symmetric area around
-    coordinate, so as to preserve boundary values.
+    Weigh pixels at LUT boundaries more highly than remaining
+    interpolated pixels.
 
     """
     rstart, gstart, bstart = coordinate
@@ -198,26 +199,38 @@ def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel
 
     sum_color = numpy.zeros(3)
     sum_weights = 0
-    # calculate radii around coordinate that fit within the LUT. Radii
-    # are kernel_radius by default, but get smaller near boundaries.
-    # If this were not done, smoothing volumes would become asymmetric
-    # at boundaries, and limit extreme values.
-    rradius = min(kernel_radius, rstart, LUT_CUBE_SIZE-rstart-1)
-    gradius = min(kernel_radius, gstart, LUT_CUBE_SIZE-gstart-1)
-    bradius = min(kernel_radius, bstart, LUT_CUBE_SIZE-bstart-1)
     # iterate over all indices in a box around coordinate:
-    for rdelta in range(-rradius, rradius+1):
-        for gdelta in range(-gradius, gradius+1):
-            for bdelta in range(-bradius, bradius+1):
+    for rdelta in range(-kernel_radius, kernel_radius+1):
+        for gdelta in range(-kernel_radius, kernel_radius+1):
+            for bdelta in range(-kernel_radius, kernel_radius+1):
+                # skip out-of-bounds indices:
+                if (rstart+rdelta < 0 or rstart+rdelta >= LUT_CUBE_SIZE or
+                    gstart+gdelta < 0 or gstart+gdelta >= LUT_CUBE_SIZE or
+                    bstart+bdelta < 0 or bstart+bdelta >= LUT_CUBE_SIZE):
+                    continue
                 weight = kernel[kernel_radius+rdelta, kernel_radius+gdelta, kernel_radius+bdelta]
                 sample_count = count_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
+                # emphasize weight of boundary pixels, to counteract
+                # their diminished weight from the reduced smoothing
+                # area:
                 if rstart+rdelta == 0 or gstart+gdelta == 0 or bstart+bdelta == 0 or \
                    rstart+rdelta == LUT_CUBE_SIZE-1 or gstart+gdelta == LUT_CUBE_SIZE-1 or \
                    bstart+bdelta == LUT_CUBE_SIZE-1:
                     weight *= BOUNDARY_WEIGHT_FACTOR
+                # emphasize sampled colors over neutral ones:
                 elif sample_count > MIN_COLOR_SAMPLES:
                     weight *= WEIGHT_FACTOR
-                lut_color = lut_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
+                # get previous LUT color:
+                lut_r, lut_g, lut_b = lut_matrix[rstart+rdelta, gstart+gdelta, bstart+bdelta]
+                # extrapolate color to current coordinates:
+                lut_r = int(lut_r) - rdelta * RGB2IDX
+                lut_r = min(max(0, lut_r), 255)
+                lut_g = int(lut_g) - gdelta * RGB2IDX
+                lut_g = min(max(0, lut_g), 255)
+                lut_b = int(lut_b) - bdelta * RGB2IDX
+                lut_b = min(max(0, lut_b), 255)
+                lut_color = numpy.array([lut_r, lut_g, lut_b], dtype='uint8')
+                # add weight and color to average counters:
                 sum_color = sum_color + weight * lut_color
                 sum_weights += weight
     r, g, b = sum_color / sum_weights
