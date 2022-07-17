@@ -8,13 +8,13 @@ from tqdm import tqdm
 
 
 MIN_COLOR_SAMPLES = 5  # discard LUT pixels if they have less than this many color samples
-LUT_CUBE_SIZE = 64  # LUT cube size, this many steps per color
-LUT_IMAGE_SIZE = 512  # corresponding LUT image size
-WEIGHT_FACTOR = 2  # factor to weigh sampled colors higher than neutral colors
+LUT_CUBE_SIZE = 16     # LUT cube size, this many steps per color
+LUT_IMAGE_SIZE = 64    # corresponding LUT image size
+WEIGHT_FACTOR = 2      # factor to weigh sampled colors higher than neutral colors
 BOUNDARY_WEIGHT_FACTOR = 5  # factor to weigh boundary colors higher than neutral colors
-SMOOTHING_SIGMA = 4  # standard deviation of smoothing kernel
-                     # kernel is a 6*sigma gaussian cube
-SUBSAMPLING = 5  # downscale images by this factor
+SMOOTHING_SIGMA = 1    # standard deviation of smoothing kernel
+                       # kernel is a 6*sigma gaussian cube
+SUBSAMPLING = 5        # downscale images by this factor
 
 RGB2IDX = int(256 / LUT_CUBE_SIZE)  # conversion factor from RGB levels to cube coordinates
 assert LUT_CUBE_SIZE**3 == LUT_IMAGE_SIZE**2, "LUT configuration invalid"
@@ -115,10 +115,10 @@ def count_pixels(source, target, color_sum, color_count):
     """
     for x in range(source.shape[0]):
         for y in range(source.shape[1]):
-            ridx, gidx, bidx = source[x, y] // RGB2IDX
+            # 0-7 -> 0, 8-23 -> 1, ... 229-245 -> 14, 245-255 -> 15
+            ridx, gidx, bidx = (source[x, y] - RGB2IDX//2) // (RGB2IDX+1) + 1
             color_sum[ridx, gidx, bidx] += target[x, y]
-            if not (ridx == gidx == bidx == 0):  # don't count black pixels; they are probably artifacts
-                color_count[ridx, gidx, bidx] += 1
+            color_count[ridx, gidx, bidx] += 1
 
 
 def generate_lut(color_sum, color_count):
@@ -132,13 +132,12 @@ def generate_lut(color_sum, color_count):
         for gidx in range(LUT_CUBE_SIZE):
             for bidx in range(LUT_CUBE_SIZE):
                 sample_count = color_count[ridx, gidx, bidx]
-                identity_color = [ridx * RGB2IDX, gidx * RGB2IDX, bidx * RGB2IDX]
+                identity_color = [ridx * (RGB2IDX+1), gidx * (RGB2IDX+1), bidx * (RGB2IDX+1)]
                 mean_color = (color_sum[ridx, gidx, bidx] / sample_count).clip(0, 255) \
                     if sample_count > 0 else [0, 0, 0]
                 # artifact conditions:
                 # - not enough samples
-                # - color obviously wrong
-                if sample_count < MIN_COLOR_SAMPLES or sum(mean_color) < sum(identity_color)/2:
+                if sample_count < MIN_COLOR_SAMPLES:
                     lut_matrix[ridx, gidx, bidx] = identity_color
                     # and mark color as interpolated for later smoothing step:
                     color_count[ridx, gidx, bidx] = 0
