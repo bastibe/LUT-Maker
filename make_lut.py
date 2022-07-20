@@ -20,7 +20,7 @@ RGB2IDX = int(256 / LUT_CUBE_SIZE)  # conversion factor from RGB levels to cube 
 assert LUT_CUBE_SIZE**3 == LUT_IMAGE_SIZE**2, "LUT configuration invalid"
 
 
-def main(source_path, target_path, lut_name):
+def main(source_path, target_path, lut_name, mono=False):
     """Read all images in source/target path, smooth and extrapolate, then create LUT"""
 
     print(f"Generating LUT: {lut_name} ({source_path}->{target_path})")
@@ -34,7 +34,7 @@ def main(source_path, target_path, lut_name):
         except TypeError as err:
             print(err)  # skip image if there was an error
 
-    lut_matrix = generate_lut(color_sum, color_count)
+    lut_matrix = generate_lut(color_sum, color_count, mono)
     lut_matrix = smooth_and_extrapolate_lut(lut_matrix, color_count, SMOOTHING_SIGMA)
     lut_image = lut_matrix.swapaxes(0, 2).reshape([LUT_IMAGE_SIZE, LUT_IMAGE_SIZE, 3])
     Image.fromarray(lut_image).save(lut_name, 'PNG')
@@ -121,7 +121,7 @@ def count_pixels(source, target, color_sum, color_count):
             color_count[ridx, gidx, bidx] += 1
 
 
-def generate_lut(color_sum, color_count):
+def generate_lut(color_sum, color_count, mono=False):
     """Average out samples from color_sum, but reject obvious artifacts
 
     artifacts are replaced by identity colors
@@ -133,6 +133,11 @@ def generate_lut(color_sum, color_count):
             for bidx in range(LUT_CUBE_SIZE):
                 sample_count = color_count[ridx, gidx, bidx]
                 identity_color = [ridx * (RGB2IDX+1), gidx * (RGB2IDX+1), bidx * (RGB2IDX+1)]
+                if mono:
+                    # transform to monochrome according to ITU-R 601-2 luma transform:
+                    # (https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.Image.convert)
+                    luma = int(round(0.299*identity_color[0] + 0.587*identity_color[1] + 0.114*identity_color[2]))
+                    identity_color = [luma, luma, luma]
                 mean_color = (color_sum[ridx, gidx, bidx] / sample_count).clip(0, 255) \
                     if sample_count > 0 else [0, 0, 0]
                 # artifact conditions:
@@ -239,8 +244,9 @@ def smooth_extrapolate_color(lut_matrix, count_matrix, sigma, coordinate, kernel
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Make a LUT from image pairs')
+    parser.add_argument('--mono', action='store_true', help='generate monochrome LUT')
     parser.add_argument('source_dir', type=str, help='directory containing unprocessed images')
     parser.add_argument('target_dir', type=str, help='directory containing processed images')
     parser.add_argument('lut_name', type=str, help='name of the resulting LUT')
     args = parser.parse_args()
-    main(pathlib.Path(args.source_dir), pathlib.Path(args.target_dir), args.lut_name)
+    main(pathlib.Path(args.source_dir), pathlib.Path(args.target_dir), args.lut_name, mono=args.mono)
